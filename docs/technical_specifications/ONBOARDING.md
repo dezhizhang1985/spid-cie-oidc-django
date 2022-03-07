@@ -14,6 +14,8 @@ The actions to accredit an entity within the demo federation are described below
    - __warning__ this onboarding demo comes with an unprotected registration page.
    The SPID and CIE authentication won't be involved in this demo.
 
+![onboardinglanding](onboardinglanding.png)
+
 2. becomes recognizable as an org affiliate and is given privileges to operate on
 behalf of that org for the registration of an entity, if not already present within the federation.
 
