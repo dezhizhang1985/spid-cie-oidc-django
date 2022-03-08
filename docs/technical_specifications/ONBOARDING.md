@@ -19,6 +19,7 @@ The actions to accredit an entity within the demo federation are described below
 2. becomes recognizable as an org affiliate and is given privileges to operate on
 behalf of that org for the registration of an entity, if not already present within the federation.
 
+![formregistration](../images/formregistration.png)
 
 3. The user accesses the submission form of a federation entity, fill in the following REQUIRED fields:
     1. Organization Name (String)
@@ -49,6 +50,10 @@ behalf of that org for the registration of an entity, if not already present wit
     8. SPID/CIE authentication request trigger url at the onboarding system testing OP
         1. validators:
             - Null, just for demo purpose
+
+![fillregistration](../images/fillregistration.png)
+
+![listentity](../images/listentity.png)
 
 ### SPID/CIE QaD tests
 
