@@ -84,7 +84,7 @@ class OpBase:
         rp_trust_chain = TrustChain.objects.filter(
             type="openid_relying_party",
             sub=self.payload["iss"],
-            trust_anchor__sub=settings.OIDCFED_TRUST_ANCHOR
+            trust_anchor__sub=settings.OIDCFED_DEFAULT_TRUST_ANCHOR
         ).first()
         if rp_trust_chain and not rp_trust_chain.is_active:
             state = self.payload["state"]
@@ -98,7 +98,7 @@ class OpBase:
         elif not rp_trust_chain or rp_trust_chain.is_expired:
             rp_trust_chain = get_or_create_trust_chain(
                 subject=self.payload["iss"],
-                trust_anchor=settings.OIDCFED_TRUST_ANCHOR,
+                trust_anchor=settings.OIDCFED_DEFAULT_TRUST_ANCHOR,
                 metadata_type="openid_relying_party",
                 httpc_params=HTTPC_PARAMS,
                 required_trust_marks=getattr(
@@ -121,7 +121,7 @@ class OpBase:
             state = self.payload["iss"]
             logger.error(
                 f"Invalid jwk for {self.payload['iss']}. "
-                f"{header['kid']} not found in {jwks}."
+                f"{header['kid']} not found in {jwks}. "
                 "error=unauthorized_client, "
                 f"state={state}"
             )
@@ -620,7 +620,8 @@ class TokenEndpoint(OpBase, View):
             seconds = access_token['exp'] - access_token['iat']
         ).seconds
 
-        issuedToken.update(revoked=True)
+        issuedToken.revoked = True
+        issuedToken.save()
         return JsonResponse(
             {
                 "access_token": jwt_at,
@@ -633,13 +634,10 @@ class TokenEndpoint(OpBase, View):
         )
 
     def post(self, request, *args, **kwargs):
-
         logger.debug(f"{request.headers}: {request.POST}")
-
-        # TODO: Francesca - please apply token request json validator on request.POST
         try:
             schema = OIDCFED_PROVIDER_PROFILES[OIDCFED_DEFAULT_PROVIDER_PROFILE]
-            schema["token_request"](**request.POST.dict())
+            schema[request.POST["grant_type"]](**request.POST.dict())
         except ValidationError as e:
             logger.error(
                 "Token request object validation failed "
@@ -737,6 +735,20 @@ class UserInfoEndpoint(OpBase, View):
 class RevocationEndpoint(OpBase,View):
 
     def post(self, request, *args, **kwargs):
+        try:
+            schema = OIDCFED_PROVIDER_PROFILES[OIDCFED_DEFAULT_PROVIDER_PROFILE]
+            schema["revocation_request"](**request.POST.dict())
+        except ValidationError as e:
+            logger.error(
+                "Revocation request object validation failed "
+                f"for {request.POST.get('client_id', None)}: {e} "
+            )
+            return JsonResponse(
+                {
+                    "error": "invalid_request",
+                    "error_description": "Revocation request object validation failed ",
+                }
+            )
         try:
             self.check_client_assertion(
                 request.POST['client_id'],
