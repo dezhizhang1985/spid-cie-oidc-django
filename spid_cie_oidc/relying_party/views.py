@@ -27,10 +27,11 @@ from spid_cie_oidc.entity.models import (FederationEntityConfiguration,
 from spid_cie_oidc.entity.settings import HTTPC_PARAMS
 from spid_cie_oidc.entity.statements import get_http_url
 from spid_cie_oidc.entity.trust_chain_operations import get_or_create_trust_chain
-from spid_cie_oidc.onboarding.schemas.authn_requests import AcrValuesSpid
+from spid_cie_oidc.relying_party.exceptions import ValidationException
 from spid_cie_oidc.relying_party.settings import (
     RP_DEFAULT_PROVIDER_PROFILES,
-    RP_PROVIDER_PROFILES
+    RP_PROVIDER_PROFILES,
+    OIDCFED_ACR_PROFILES
 )
 
 from .models import OidcAuthentication, OidcAuthenticationToken
@@ -79,7 +80,6 @@ class SpidCieOidcRp:
             raise InvalidTrustchain(
                 "Missing provider url. Please try '?provider=https://provider-subject/'"
             )
-
         trust_anchor = request.GET.get(
             "trust_anchor",
             settings.OIDCFED_IDENTITY_PROVIDERS.get(
@@ -131,12 +131,7 @@ class SpidCieOidcRp:
                 f"{error_description} "
                 f"for {request.get('client_id', None)}: {e} "
             )
-            return JsonResponse(
-                {
-                    "error": "invalid_request",
-                    "error_description": f"{error_description} ",
-                }
-            )
+            raise ValidationException()
 
 
 class SpidCieOidcRpBeginView(SpidCieOidcRp, View):
@@ -229,19 +224,20 @@ class SpidCieOidcRpBeginView(SpidCieOidcRp, View):
                 f"Reverted to default {client_conf['redirect_uris'][0]}."
             )
             redirect_uri = client_conf["redirect_uris"][0]
-
+        _profile = request.GET.get("profile", "spid")
+        _acr = OIDCFED_ACR_PROFILES[_profile]
         authz_data = dict(
-            scope=" ".join([i for i in request.GET.get("scope", ["openid"])]),
+            scope= request.GET.get("scope", None) or "openid",
             redirect_uri=redirect_uri,
             response_type=client_conf["response_types"][0],
             nonce=random_string(32),
             state=random_string(32),
             client_id=client_conf["client_id"],
             endpoint=authz_endpoint,
-            acr_values=request.GET.get("acr_values", AcrValuesSpid.l2.value),
+            acr_values= _acr,
             iat=int(timezone.localtime().timestamp()),
             aud=[tc.sub, authz_endpoint],
-            claims=RP_REQUEST_CLAIM_BY_PROFILE[request.GET.get("profile", "spid")],
+            claims=RP_REQUEST_CLAIM_BY_PROFILE[_profile],
         )
 
         _prompt = request.GET.get("prompt", "consent login")
@@ -344,13 +340,20 @@ class SpidCieOidcRpCallbackView(View, SpidCieOidcRp, OidcUserInfo, OAuth2Authori
         authz = OidcAuthentication.objects.filter(
             state=request_args.get("state"),
         )
-        result = self.validate_json_schema(
-            request.GET.dict(),
-            "authn_response",
-            "Authn response object validation failed"
-        )
-        if result:
-            return result
+        try:
+            self.validate_json_schema(
+                request.GET.dict(),
+                "authn_response",
+                "Authn response object validation failed"
+            )
+        except ValidationException as e:
+            return JsonResponse(
+                {
+                    "error": "invalid_request",
+                    "error_description": "Authn response object validation failed",
+                },
+                status = 400
+            )
 
         if not authz:
             # TODO: verify error message and status
@@ -405,20 +408,21 @@ class SpidCieOidcRpCallbackView(View, SpidCieOidcRp, OidcUserInfo, OAuth2Authori
             return render(request, self.error_template, context, status=400)
 
         else:
-            result = self.validate_json_schema(
-                token_response,
-                "token_response",
-                "Token response object validation failed"
-            )
-            if result:
-                return result
-
-        entity_conf = FederationEntityConfiguration.objects.filter(
-            entity_type="openid_provider",
-        ).first()
-
-        op_conf = entity_conf.metadata["openid_provider"]
-        jwks = op_conf["jwks"]["keys"]
+            try:
+                self.validate_json_schema(
+                    token_response,
+                    "token_response",
+                    "Token response object validation failed"
+                )
+            except ValidationException as e:
+                return JsonResponse(
+                    {
+                        "error": "invalid_request",
+                        "error_description": "Token response object validation failed",
+                    },
+                    status = 400
+                )
+        jwks = authz.provider_configuration["jwks"]["keys"]
         access_token = token_response["access_token"]
         id_token = token_response["id_token"]
         op_ac_jwk = self.get_jwk_from_jwt(access_token, jwks)
@@ -464,7 +468,6 @@ class SpidCieOidcRpCallbackView(View, SpidCieOidcRp, OidcUserInfo, OAuth2Authori
         authz_token.token_type = token_response["token_type"]
         authz_token.expires_in = token_response["expires_in"]
         authz_token.save()
-
         userinfo = self.get_userinfo(
             authz.state,
             authz_token.access_token,
@@ -588,10 +591,17 @@ def oidc_rp_landing(request):
     trust_chains = TrustChain.objects.filter(
         type="openid_provider", is_active=True
     )
-    providers = []
+    spid_providers = []
+    cie_providers = []
     for tc in trust_chains:
-        if tc.is_valid:
-            providers.append(tc)
-    random.shuffle(providers)
-    content = {"providers": providers}
+        if tc.is_active:
+            if tc.sub in settings.OIDCFED_IDENTITY_PROVIDERS.get("spid", []):
+                spid_providers.append(tc)
+            elif tc.sub in settings.OIDCFED_IDENTITY_PROVIDERS.get("cie", []):
+                cie_providers.append(tc)
+    random.shuffle(spid_providers)
+    content = {
+        "spid_providers": spid_providers,
+        "cie_providers" : cie_providers
+    }
     return render(request, "rp_landing.html", content)

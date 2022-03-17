@@ -15,12 +15,12 @@ from django.shortcuts import render
 from django.urls import reverse
 from django.utils.translation import gettext as _
 from django.views import View
-from pydantic import ValidationError as pydantic_ValidationError
 from spid_cie_oidc.entity.exceptions import InvalidEntityConfiguration
 from spid_cie_oidc.provider.forms import AuthLoginForm, AuthzHiddenForm
 from spid_cie_oidc.provider.models import OidcSession
 
-from spid_cie_oidc.provider.exceptions import AuthzRequestReplay
+from spid_cie_oidc.provider.exceptions import AuthzRequestReplay, ValidationException
+from spid_cie_oidc.provider.settings import OIDCFED_DEFAULT_PROVIDER_PROFILE, OIDCFED_PROVIDER_PROFILES_DEFAULT_ACR
 
 from . import OpBase
 logger = logging.getLogger(__name__)
@@ -34,12 +34,15 @@ class AuthzRequestView(OpBase, View):
 
     template = "op_user_login.html"
 
-    def validate_authz(self, payload: dict) -> None:
+    def validate_authz(self, payload: dict):
 
         must_list = ("scope", "acr_values")
         for i in must_list:
             if isinstance(payload.get(i, None), str):
-                payload[i] = [payload[i]]
+                if ' ' in payload[i]:
+                    payload[i] = payload[i].split(' ')
+                else:
+                    payload[i] = [payload[i]]
 
         redirect_uri = payload.get("redirect_uri", "")
         p = urllib.parse.urlparse(redirect_uri)
@@ -115,17 +118,14 @@ class AuthzRequestView(OpBase, View):
                 state = self.payload.get("state", "")
 
             )
-
         try:
             self.validate_authz(self.payload)
-        except (Exception, pydantic_ValidationError) as e:
-            logger.warning(f"Authz request failed: {e}")
+        except ValidationException as e:
             return self.redirect_response_data(
                 self.payload["redirect_uri"],
                 error="invalid_request",
                 error_description=_("Authorization request validation error"),
                 state = self.payload.get("state", "")
-
             )
 
         # stores the authz request in a hidden field in the form
@@ -199,6 +199,12 @@ class AuthzRequestView(OpBase, View):
         request.session["oidc"] = {"auth_code": auth_code}
 
         # store the User session
+        _provider_profile = getattr(
+            settings,
+            'OIDCFED_DEFAULT_PROVIDER_PROFILE',
+            OIDCFED_DEFAULT_PROVIDER_PROFILE
+        )
+        default_acr = OIDCFED_PROVIDER_PROFILES_DEFAULT_ACR[_provider_profile]
         session = OidcSession.objects.create(
             user=user,
             user_uid=user.username,
@@ -206,6 +212,11 @@ class AuthzRequestView(OpBase, View):
             authz_request=self.payload,
             client_id=self.payload["client_id"],
             auth_code=auth_code,
+            acr=(
+                self.payload["acr_values"][-1]
+                if len(self.payload.get("acr_values",[])) > 0
+                else default_acr
+            )
         )
         session.set_sid(request)
         url = reverse("oidc_provider_consent")
